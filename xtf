@@ -1,0 +1,279 @@
+#!/bin/bash
+# xkovarj00 Jakub Kovarik
+# 14/03/2024
+# IOS - Projekt #1
+
+export POSIXLY_CORRECT=yes  
+export LC_ALL=C # for correct sorting
+
+print_usage() {
+    echo "Usage: $0 [-h|--help] [FILTER] [COMMAND] USERNAME FILE [FILE2 [...]]"
+}
+
+COMMAND=
+USERNAME=
+AFTER_DATE_FILTER=
+BEFORE_DATE_FILTER=
+CURRENCY_FILTERS=
+
+##############################################################  ARG PARSING 
+
+check_date_format() {
+    local DATE="$1"
+    local pattern='^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}$'
+
+    if ! echo "$DATE" | grep -qE "$pattern"; then
+        return 1
+    fi
+
+    return 0
+}
+
+# Process the [FILTER] and [-h|--help]part of the argument list
+while [ "$#" -gt 0 ]; do  #while args.size() > 0
+    case "$1" in
+        -h|--help)
+            print_usage
+            exit 0
+            ;;
+        -a|-b|-c)
+            #  If -c flag is processed, expect a value of length 3 as the next argument
+            if [ "$1" == -c ] && [ "${#2}" -ne 3 ]; then
+                echo "Error: Value after -c flag is not length 3" >&2
+                exit 1
+            fi
+            # If the value after a flag is empty or it is a next flag, it must be in incorrect format 
+            if [ -z "$2" ] || [[ "$2" == -* ]]; then
+                echo "Error: Expected a value after $1 flag" >&2
+                exit 1
+            fi
+
+            if [ "$1" == -a ]; then
+                check_date_format "$2"
+                if [ $? -eq 1 ]; then
+                    echo "Error: The provided datetime vlaue: $2 is not in correct format" >&2
+                    exit 1; 
+                fi  
+                if [ -n "$AFTER_DATE_FILTER" ]; then
+                    echo "Error: -a flag was already specified" >&2
+                    exit 1; 
+                fi
+                AFTER_DATE_FILTER=$2
+            fi
+            if [ "$1" == -b ]; then
+                check_date_format "$2"
+                if [ $? -eq 1 ]; then
+                    echo "Error: The provided datetime vlaue: $2 is not in correct format" >&2
+                    exit 1
+                fi  
+                if [ -n "$BEFORE_DATE_FILTER" ]; then
+                    echo "Error: -b flag was already specified" >&2
+                    exit 1
+                fi
+                BEFORE_DATE_FILTER=$2
+            fi
+            if [ "$1" == -c ]; then
+                CURRENCY_FILTERS="$CURRENCY_FILTERS $2"
+            fi
+
+            shift 2
+            ;;
+        list|status|profit|list-currency)
+
+            if [ -n "$COMMAND" ]; then
+                echo "Error: At most one command is expected" >&2
+                exit 1
+            fi
+            COMMAND="$1"
+            shift
+        ;;
+        *)  # default:
+            if [ -n "$USERNAME" ]; then
+                break;
+            fi
+            USERNAME="$1"
+            shift
+            ;;
+    esac
+done
+
+# If COMMAND is empty, assume list command was meant to be used
+if [ -z "$COMMAND" ]; then
+    COMMAND="list"
+fi
+
+# Anything that comes after a command is assumed to be a USERNAME
+#USERNAME="$1"
+#shift
+
+# Check if a username was provided
+if [ -z "$USERNAME" ]; then
+    echo "Error: Username is required." >&2
+    exit 1
+fi
+
+# Check if at least one FILE is provided
+if [ "$#" -eq 0 ]; then
+    echo "Error: At least one FILE is required" >&2
+    exit 1
+fi
+
+##############################################################  RECORD FILTERING
+
+process_file() {
+    local file="$1"
+    local filtered_records_from_file=""
+    # Check if the file is gzipped
+    if [[ "$file" == *.gz ]]; then
+        filtered_records_from_file=$(gunzip -c "$file" | process_lines)
+    else
+        # Read uncompressed files line by line
+        filtered_records_from_file=$(process_lines < "$file")
+    fi
+
+    echo "$filtered_records_from_file"
+}
+
+datetime_within_range() {
+    local datetime="$1"
+    local start="$2"
+    local end="$3"
+
+    # If end or start filter is unset, set them to boundary datetime values so that
+    # They work as they were not taken into consideration
+    if [ -z "$end" ]; then
+        end="9999-12-31 23:59:59"
+    fi
+
+    if [ -z "$start" ]; then
+        start="0000-01-01 00:00:00"
+    fi
+
+    # Convert the datetime strings to timestamps so they can be compared
+    local datetime_timestamp=$(date -d "$datetime" +%s)
+    local start_timestamp=$(date -d "$start" +%s)
+    local end_timestamp=$(date -d "$end" +%s)
+    
+    # Check if datetime is within the given range
+    if [ "$datetime_timestamp" -gt "$start_timestamp" ] && [ "$datetime_timestamp" -lt "$end_timestamp" ]; then
+        return 0  # Within range
+    else
+        return 1  # Not within range
+    fi
+}
+
+process_lines() {
+    while IFS= read -r line; do
+        # Split the line into fields
+        IFS=';' read -r -a fields <<< "$line"
+
+        # Extract fields
+        username="${fields[0]}"
+        datetime="${fields[1]}"
+        currency="${fields[2]}"
+        amount="${fields[3]}"
+
+        check_date_format "$datetime"
+        if [ $? -eq 1 ]; then
+            echo "Error: Datetime from input files with vlaue: $datetime is not in correct format" >&2
+            exit 1
+        fi  
+        if [ -z "$username" ] || [ -z "$currency" ] || [ "${#currency}" -ne 3 ] || [ -z "$amount" ]; then
+            echo "Error: Some fileds in input files are in incorrect format" >&2
+            exit 1
+        fi  
+
+        datetime_within_range "$datetime" "$AFTER_DATE_FILTER" "$BEFORE_DATE_FILTER" 
+        datetimeWithinRange=$?
+
+        # Apply filters
+        if [ "$username" == "$USERNAME" ] && { [ -z "$CURRENCY_FILTERS" ] || [[ "$CURRENCY_FILTERS" == *"$currency"*  ]]; } && [ $datetimeWithinRange -eq 0 ]; then
+            echo "$line"
+        fi
+    done
+}
+
+# In argument parsing part, everything before filenames was shifted away,
+# so $@ only contains filenames 
+for file in "$@"; do
+    
+    if [ ! -e "$file" ]; then
+        echo "File '$file' does not exist." >&2
+        exit 1;
+    fi
+
+    filtered_records+=$(process_file "$file")
+    filtered_records+="\n"
+done
+filtered_records=${filtered_records::-2}
+##############################################################  COMMAND EXECUTION
+
+# Function to calculate the increased amount
+if [ -z "$filtered_records" ]; then
+    echo -e ""
+    exit 0;
+fi
+
+case "$COMMAND" in
+    list)
+        # Simply print all the filtered_records as they are already in the proper format
+        echo -e "$filtered_records"
+        ;;
+    list-currency)
+        # Print list of unique currencies that appeard across all the records
+        echo -e "$filtered_records" | awk -F';' '{print $3}' | sort -u
+        ;;
+    status)
+        # Sum the amounts of corresponding currencies
+        currency_amount_pairs=$(echo -e "$filtered_records" | awk -F';' '
+            { sums[$3]+=$4 } 
+            END {
+                for (currency in sums) {
+                    printf "%s : %.4f\n", currency, sums[currency]
+                } 
+            }
+        ')
+
+        # Print sorted CURRENCY - AMOUNT pairs
+        echo -e "$currency_amount_pairs" | sort
+        ;;
+    profit)
+
+        if [ -z "$XTF_PROFIT" ]; then
+            XTF_PROFIT=20
+        fi
+
+         # Sum the amounts of corresponding currencies
+        currency_amount_pairs=$(echo -e "$filtered_records" | awk -F';' '
+            { sums[$3]+=$4 } 
+            END {
+                for (currency in sums) {
+                    printf "%s %.4f\n", currency, sums[currency]
+                } 
+            }
+        ')
+
+        # Print sorted CURRENCY - AMOUNT pairs
+        sorted_currency_amount_pairs=$(printf "%s\n" "$currency_amount_pairs" | sort)
+        
+        # Read input line by line and process
+        while IFS=' ' read -r line; do
+            # Split the line into currency code and amount
+            currency=$(echo "$line" | awk '{print $1}')
+            amount=$(echo "$line" | awk '{print $2}')
+            # Check if the amount is positive using awk
+            is_positive=$(awk -v amt="$amount" 'BEGIN{if(amt > 0) print 1; else print 0}')
+
+            if [ "$is_positive" -eq 1 ]; then
+                # Increase the amount by the profit percentage
+                increased_amount=$(awk -v profit="$XTF_PROFIT" -v amt="$amount" 'BEGIN{printf "%.4f", amt * (1 + profit / 100)}')
+
+                printf "%s : %.4f\n" "$currency" "$increased_amount"
+            else
+                printf "%s : %.4f\n" "$currency" "$amount"
+            fi
+        done <<< "$sorted_currency_amount_pairs"
+        ;;
+esac
+
+exit 0
