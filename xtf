@@ -198,7 +198,12 @@ process_lines() {
 for file in "$@"; do
     
     if [ ! -e "$file" ]; then
-        echo "File '$file' does not exist." >&2
+        echo "Error: File '$file' does not exist." >&2
+        exit 1;
+    fi
+
+    if [ ! -r "$file" ]; then
+        echo "Error: Do not have permission to read file '$file'" >&2
         exit 1;
     fi
 
